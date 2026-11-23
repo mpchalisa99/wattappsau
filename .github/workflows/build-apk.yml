@@ -30,11 +30,11 @@ jobs:
           echo "<h1>WattappsAU Loading...</h1>" > www/index.html
           npm install
           npm install -D @capacitor/assets
-          npx cap init "WattappsAU" "id.diskomlekau.wattappsau" --web-dir www
+          npx cap init "WattappsAU" "mil.tniau.diskomlekau.wattappsau" --web-dir www
           node -e '
             const fs = require("fs");
             const cfg = {
-              appId: "id.diskomlekau.wattappsau",
+              appId: "mil.tniau.diskomlekau.wattappsau",
               appName: "WattappsAU",
               webDir: "www",
               server: {
@@ -55,14 +55,194 @@ jobs:
             npx capacitor-assets generate --android
           fi
 
-      - name: Inject KeepAliveService, CallNotification, Tablet WebView & Camera Permissions
+      - name: Configure Firebase FCM, KeepAliveService, Anti-Freeze WebView & Notifications
         run: |
-          PKG_DIR="android/app/src/main/java/id/diskomlekau/wattappsau"
+          PKG_DIR="android/app/src/main/java/mil/tniau/diskomlekau/wattappsau"
           mkdir -p "$PKG_DIR"
 
-          # 1. Buat KeepAliveService.java
+          # 1. Tulis google-services.json langsung ke android/app/
+          cat << 'EOF' > android/app/google-services.json
+          {
+            "project_info": {
+              "project_number": "373114469262",
+              "project_id": "gen-lang-client-0858065140",
+              "storage_bucket": "gen-lang-client-0858065140.firebasestorage.app"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:373114469262:android:8149352219a89a0c5d82df",
+                  "android_client_info": {
+                    "package_name": "mil.tniau.diskomlekau.wattappsau"
+                  }
+                },
+                "oauth_client": [],
+                "api_key": [
+                  {
+                    "current_key": "AIzaSyDZlBHU-LemnGVJDz62t3e-eaumm0lYGmo"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": []
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+
+          # 2. Suntik plugin & dependency Firebase Messaging ke Gradle
+          node -e '
+            const fs = require("fs");
+            let rootGradle = fs.readFileSync("android/build.gradle", "utf8");
+            if (!rootGradle.includes("com.google.gms:google-services")) {
+              rootGradle = rootGradle.replace(
+                /dependencies\s*\{/,
+                "dependencies {\n        classpath \"com.google.gms:google-services:4.4.2\""
+              );
+              fs.writeFileSync("android/build.gradle", rootGradle);
+            }
+
+            let appGradle = fs.readFileSync("android/app/build.gradle", "utf8");
+            if (!appGradle.includes("com.google.gms.google-services")) {
+              appGradle += "\napply plugin: \"com.google.gms.google-services\"\n";
+            }
+            if (!appGradle.includes("firebase-messaging")) {
+              appGradle = appGradle.replace(
+                /dependencies\s*\{/,
+                "dependencies {\n    implementation \"com.google.firebase:firebase-messaging:24.0.3\""
+              );
+            }
+            fs.writeFileSync("android/app/build.gradle", appGradle);
+          '
+
+          # 3. Buat WattappsFirebaseService.java (Menerima Push Notification saat aplikasi mati/layar terkunci)
+          cat << 'EOF' > "$PKG_DIR/WattappsFirebaseService.java"
+          package mil.tniau.diskomlekau.wattappsau;
+
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.media.AudioAttributes;
+          import android.media.RingtoneManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.PowerManager;
+          import android.os.VibrationEffect;
+          import android.os.Vibrator;
+          import androidx.annotation.NonNull;
+          import androidx.core.app.NotificationCompat;
+          import com.google.firebase.messaging.FirebaseMessagingService;
+          import com.google.firebase.messaging.RemoteMessage;
+          import java.util.Map;
+
+          public class WattappsFirebaseService extends FirebaseMessagingService {
+              @Override
+              public void onNewToken(@NonNull String token) {
+                  super.onNewToken(token);
+                  getSharedPreferences("wattappsau_prefs", MODE_PRIVATE)
+                      .edit()
+                      .putString("fcm_token", token)
+                      .apply();
+              }
+
+              @Override
+              public void onMessageReceived(@NonNull RemoteMessage remoteMessage) {
+                  super.onMessageReceived(remoteMessage);
+                  try {
+                      Map<String, String> data = remoteMessage.getData();
+                      String type = data.containsKey("type") ? data.get("type") : "message";
+                      String sender = data.containsKey("sender") ? data.get("sender") : "WattappsAU";
+                      String body = data.containsKey("body") ? data.get("body") : "Ada pesan atau panggilan masuk";
+
+                      wakeScreen();
+                      showPushNotification(type, sender, body);
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+              }
+
+              private void wakeScreen() {
+                  try {
+                      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                      if (pm != null && !pm.isInteractive()) {
+                          @SuppressWarnings("deprecation")
+                          PowerManager.WakeLock wl = pm.newWakeLock(
+                              PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                              "WattappsAU::FCMWake"
+                          );
+                          wl.acquire(15000);
+                      }
+                  } catch (Exception ignored) {}
+              }
+
+              private void showPushNotification(String type, String title, String body) {
+                  boolean isCall = "call".equalsIgnoreCase(type);
+                  String channelId = isCall ? "wattappsau_incoming_call_v3" : "wattappsau_incoming_msg_v3";
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  if (nm == null) return;
+
+                  Uri soundUri = isCall
+                      ? RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                      : RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel ch = new NotificationChannel(
+                          channelId,
+                          isCall ? "Panggilan Masuk WattappsAU" : "Pesan Masuk WattappsAU",
+                          NotificationManager.IMPORTANCE_HIGH
+                      );
+                      ch.enableVibration(true);
+                      ch.setLockscreenVisibility(android.app.Notification.VISIBILITY_PUBLIC);
+                      AudioAttributes attr = new AudioAttributes.Builder()
+                          .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                          .setUsage(isCall ? AudioAttributes.USAGE_NOTIFICATION_RINGTONE : AudioAttributes.USAGE_NOTIFICATION)
+                          .build();
+                      ch.setSound(soundUri, attr);
+                      nm.createNotificationChannel(ch);
+                  }
+
+                  try {
+                      Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                      if (v != null) {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              v.vibrate(VibrationEffect.createOneShot(isCall ? 1500 : 350, VibrationEffect.DEFAULT_AMPLITUDE));
+                          } else {
+                              v.vibrate(isCall ? 1500 : 350);
+                          }
+                      }
+                  } catch (Exception ignored) {}
+
+                  Intent intent = new Intent(this, MainActivity.class);
+                  intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                  PendingIntent pi = PendingIntent.getActivity(
+                      this, (int) System.currentTimeMillis(), intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+                  );
+
+                  NotificationCompat.Builder builder = new NotificationCompat.Builder(this, channelId)
+                      .setSmallIcon(isCall ? android.R.drawable.sym_call_incoming : android.R.drawable.stat_notify_chat)
+                      .setContentTitle(title)
+                      .setContentText(body)
+                      .setPriority(NotificationCompat.PRIORITY_MAX)
+                      .setCategory(isCall ? NotificationCompat.CATEGORY_CALL : NotificationCompat.CATEGORY_MESSAGE)
+                      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                      .setSound(soundUri)
+                      .setAutoCancel(true)
+                      .setFullScreenIntent(pi, true)
+                      .setContentIntent(pi);
+
+                  nm.notify((int) System.currentTimeMillis(), builder.build());
+              }
+          }
+          EOF
+
+          # 4. Buat KeepAliveService.java
           cat << 'EOF' > "$PKG_DIR/KeepAliveService.java"
-          package id.diskomlekau.wattappsau;
+          package mil.tniau.diskomlekau.wattappsau;
 
           import android.app.Notification;
           import android.app.NotificationChannel;
@@ -114,8 +294,8 @@ jobs:
                       );
 
                       Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-                          .setContentTitle("WattappsAU • Online")
-                          .setContentText("Koneksi P2P & panggilan siap di latar belakang")
+                          .setContentTitle("WattappsAU • Siaga")
+                          .setContentText("Terhubung untuk panggilan & pesan masuk")
                           .setSmallIcon(android.R.drawable.ic_dialog_info)
                           .setContentIntent(pendingIntent)
                           .setOngoing(true)
@@ -149,19 +329,27 @@ jobs:
           }
           EOF
 
-          # 2. Buat MainActivity.java dengan Optimasi WebView Tablet + Kamera + Mikrofon + Notifikasi Panggilan
+          # 5. Buat MainActivity.java (Mengambil FCM Token ke Web + Anti-Freeze WebView + Bridge)
           cat << 'EOF' > "$PKG_DIR/MainActivity.java"
-          package id.diskomlekau.wattappsau;
+          package mil.tniau.diskomlekau.wattappsau;
 
           import android.Manifest;
+          import android.app.KeyguardManager;
           import android.app.NotificationChannel;
           import android.app.NotificationManager;
           import android.app.PendingIntent;
           import android.content.Context;
           import android.content.Intent;
           import android.content.pm.PackageManager;
+          import android.media.AudioAttributes;
+          import android.media.Ringtone;
+          import android.media.RingtoneManager;
+          import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
+          import android.os.PowerManager;
+          import android.os.VibrationEffect;
+          import android.os.Vibrator;
           import android.view.WindowManager;
           import android.webkit.CookieManager;
           import android.webkit.JavascriptInterface;
@@ -174,32 +362,64 @@ jobs:
           import androidx.core.app.NotificationCompat;
           import androidx.core.content.ContextCompat;
           import com.getcapacitor.BridgeActivity;
+          import com.google.firebase.FirebaseApp;
+          import com.google.firebase.messaging.FirebaseMessaging;
           import java.util.ArrayList;
           import java.util.List;
 
           public class MainActivity extends BridgeActivity {
               private static final int REQ_PERMS = 1001;
-              private static final String CALL_CHANNEL_ID = "wattappsau_incoming_call";
+              private static final String CALL_CHANNEL_ID = "wattappsau_incoming_call_v3";
+              private static final String MSG_CHANNEL_ID = "wattappsau_incoming_msg_v3";
               private static final int CALL_NOTIF_ID = 202;
+              private static int msgNotifCounter = 300;
+              private Ringtone currentRingtone;
 
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                      setShowWhenLocked(true);
-                      setTurnScreenOn(true);
-                  } else {
-                      getWindow().addFlags(
-                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
-                          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                      );
+                  try {
+                      FirebaseApp.initializeApp(this);
+                      FirebaseMessaging.getInstance().getToken().addOnSuccessListener(token -> {
+                          getSharedPreferences("wattappsau_prefs", MODE_PRIVATE)
+                              .edit()
+                              .putString("fcm_token", token)
+                              .apply();
+                      });
+                  } catch (Exception e) {
+                      e.printStackTrace();
                   }
 
-                  createCallChannel();
+                  enableLockScreenDisplay();
+                  createNotificationChannels();
                   setupWebViewPermissionsAndBridge();
                   checkAndRequestPermissions();
                   handleCallActionIntent(getIntent());
+              }
+
+              private void enableLockScreenDisplay() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                      setShowWhenLocked(true);
+                      setTurnScreenOn(true);
+                      KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+                      if (km != null) km.requestDismissKeyguard(this, null);
+                  } else {
+                      getWindow().addFlags(
+                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                          WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                      );
+                  }
+              }
+
+              @Override
+              public void onPause() {
+                  super.onPause();
+                  if (bridge != null && bridge.getWebView() != null) {
+                      bridge.getWebView().onResume();
+                      bridge.getWebView().resumeTimers();
+                  }
               }
 
               @Override
@@ -209,9 +429,36 @@ jobs:
                   handleCallActionIntent(intent);
               }
 
+              private void wakeScreenBriefly(long durationMs) {
+                  try {
+                      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                      if (pm != null && !pm.isInteractive()) {
+                          @SuppressWarnings("deprecation")
+                          PowerManager.WakeLock screenLock = pm.newWakeLock(
+                              PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                              "WattappsAU::WakeScreen"
+                          );
+                          screenLock.acquire(durationMs);
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+              }
+
+              private void stopRingtoneAndVibration() {
+                  try {
+                      if (currentRingtone != null && currentRingtone.isPlaying()) currentRingtone.stop();
+                      Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                      if (v != null) v.cancel();
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+              }
+
               private void handleCallActionIntent(Intent intent) {
                   if (intent == null || intent.getAction() == null) return;
                   String action = intent.getAction();
+                  stopRingtoneAndVibration();
                   NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
                   if (nm != null) nm.cancel(CALL_NOTIF_ID);
 
@@ -257,6 +504,12 @@ jobs:
 
               public class WebAppInterface {
                   @JavascriptInterface
+                  public String getFcmToken() {
+                      return getSharedPreferences("wattappsau_prefs", MODE_PRIVATE)
+                          .getString("fcm_token", "");
+                  }
+
+                  @JavascriptInterface
                   public void showIncomingCall(String callerName, String callType) {
                       runOnUiThread(() -> displayIncomingCallNotification(callerName, callType));
                   }
@@ -264,13 +517,38 @@ jobs:
                   @JavascriptInterface
                   public void dismissIncomingCall() {
                       runOnUiThread(() -> {
+                          stopRingtoneAndVibration();
                           NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
                           if (nm != null) nm.cancel(CALL_NOTIF_ID);
                       });
                   }
+
+                  @JavascriptInterface
+                  public void showIncomingMessage(String senderName, String messageText) {
+                      runOnUiThread(() -> displayIncomingMessageNotification(senderName, messageText));
+                  }
               }
 
               private void displayIncomingCallNotification(String callerName, String callType) {
+                  wakeScreenBriefly(20000);
+                  try {
+                      Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+                      currentRingtone = RingtoneManager.getRingtone(getApplicationContext(), ringtoneUri);
+                      if (currentRingtone != null) currentRingtone.play();
+
+                      Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                      if (v != null) {
+                          long[] pattern = {0, 800, 600, 800, 600};
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              v.vibrate(VibrationEffect.createWaveform(pattern, 0));
+                          } else {
+                              v.vibrate(pattern, 0);
+                          }
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+
                   Intent fullScreenIntent = new Intent(this, MainActivity.class);
                   fullScreenIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
                   PendingIntent fullScreenPending = PendingIntent.getActivity(
@@ -300,6 +578,8 @@ jobs:
                       .setContentText(text)
                       .setPriority(NotificationCompat.PRIORITY_MAX)
                       .setCategory(NotificationCompat.CATEGORY_CALL)
+                      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                      .setDefaults(NotificationCompat.DEFAULT_ALL)
                       .setAutoCancel(true)
                       .setOngoing(true)
                       .setFullScreenIntent(fullScreenPending, true)
@@ -308,18 +588,87 @@ jobs:
 
                   NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
                   if (nm != null) nm.notify(CALL_NOTIF_ID, builder.build());
+
+                  try {
+                      startActivity(fullScreenIntent);
+                  } catch (Exception ignored) {}
               }
 
-              private void createCallChannel() {
+              private void displayIncomingMessageNotification(String senderName, String messageText) {
+                  wakeScreenBriefly(5000);
+                  try {
+                      Uri notifUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+                      Ringtone r = RingtoneManager.getRingtone(getApplicationContext(), notifUri);
+                      if (r != null) r.play();
+
+                      Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                      if (v != null) {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              v.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE));
+                          } else {
+                              v.vibrate(300);
+                          }
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
+
+                  Intent openIntent = new Intent(this, MainActivity.class);
+                  openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                  PendingIntent openPending = PendingIntent.getActivity(
+                      this, msgNotifCounter, openIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+                  );
+
+                  String title = (senderName != null && !senderName.isEmpty()) ? senderName : "Pesan Baru";
+                  String body = (messageText != null && !messageText.isEmpty()) ? messageText : "Mengirim pesan";
+
+                  NotificationCompat.Builder builder = new NotificationCompat.Builder(this, MSG_CHANNEL_ID)
+                      .setSmallIcon(android.R.drawable.stat_notify_chat)
+                      .setContentTitle(title)
+                      .setContentText(body)
+                      .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
+                      .setPriority(NotificationCompat.PRIORITY_HIGH)
+                      .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                      .setDefaults(NotificationCompat.DEFAULT_ALL)
+                      .setAutoCancel(true)
+                      .setContentIntent(openPending);
+
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  if (nm != null) nm.notify(msgNotifCounter++, builder.build());
+              }
+
+              private void createNotificationChannels() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      NotificationChannel channel = new NotificationChannel(
+                      NotificationManager manager = getSystemService(NotificationManager.class);
+                      if (manager == null) return;
+
+                      Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+                      AudioAttributes callAudioAttr = new AudioAttributes.Builder()
+                          .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                          .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                          .build();
+
+                      NotificationChannel callChannel = new NotificationChannel(
                           CALL_CHANNEL_ID,
                           "Panggilan Masuk WattappsAU",
                           NotificationManager.IMPORTANCE_HIGH
                       );
-                      channel.setDescription("Notifikasi layar penuh untuk panggilan masuk");
-                      NotificationManager manager = getSystemService(NotificationManager.class);
-                      if (manager != null) manager.createNotificationChannel(channel);
+                      callChannel.setDescription("Notifikasi layar penuh untuk panggilan masuk");
+                      callChannel.setLockscreenVisibility(android.app.Notification.VISIBILITY_PUBLIC);
+                      callChannel.enableVibration(true);
+                      callChannel.setSound(ringtoneUri, callAudioAttr);
+                      manager.createNotificationChannel(callChannel);
+
+                      NotificationChannel msgChannel = new NotificationChannel(
+                          MSG_CHANNEL_ID,
+                          "Pesan Masuk WattappsAU",
+                          NotificationManager.IMPORTANCE_HIGH
+                      );
+                      msgChannel.setDescription("Notifikasi pop-up pesan chat masuk");
+                      msgChannel.setLockscreenVisibility(android.app.Notification.VISIBILITY_PUBLIC);
+                      msgChannel.enableVibration(true);
+                      manager.createNotificationChannel(msgChannel);
                   }
               }
 
@@ -366,7 +715,7 @@ jobs:
           }
           EOF
 
-          # 3. Sisipkan izin Jaringan, Kamera, FullScreenIntent & service ke AndroidManifest.xml
+          # 6. Sisipkan izin & layanan (KeepAlive + WattappsFirebaseService) ke AndroidManifest.xml
           node -e '
             const fs = require("fs");
             const path = "android/app/src/main/AndroidManifest.xml";
@@ -382,18 +731,27 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.VIBRATE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
             `;
-            const service = `
+            const services = `
               <service
                   android:name=".KeepAliveService"
                   android:enabled="true"
                   android:exported="false"
                   android:foregroundServiceType="dataSync" />
+              <service
+                  android:name=".WattappsFirebaseService"
+                  android:exported="false">
+                  <intent-filter>
+                      <action android:name="com.google.firebase.MESSAGING_EVENT" />
+                  </intent-filter>
+              </service>
             `;
             xml = xml.replace("<application", perms + "\n    <application");
-            xml = xml.replace("</application>", service + "\n    </application>");
+            xml = xml.replace("</application>", services + "\n    </application>");
             fs.writeFileSync(path, xml);
           '
 
@@ -406,5 +764,5 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WattappsAU-KeepAlive-APK
+          name: WattappsAU-FCM-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
