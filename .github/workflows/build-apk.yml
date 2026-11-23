@@ -45,12 +45,12 @@ jobs:
           '
           npx cap add android
 
-      - name: Inject KeepAliveService & Permissions
+      - name: Inject KeepAliveService & Permissions Safely
         run: |
           PKG_DIR="android/app/src/main/java/id/diskomlekau/wattappsau"
           mkdir -p "$PKG_DIR"
 
-          # 1. Buat KeepAliveService.java
+          # 1. Buat KeepAliveService.java dengan penanganan error & tipe dataSync/connectedDevice yang aman
           cat << 'EOF' > "$PKG_DIR/KeepAliveService.java"
           package id.diskomlekau.wattappsau;
 
@@ -61,6 +61,7 @@ jobs:
           import android.app.Service;
           import android.content.Context;
           import android.content.Intent;
+          import android.content.pm.ServiceInfo;
           import android.os.Build;
           import android.os.IBinder;
           import android.os.PowerManager;
@@ -74,44 +75,60 @@ jobs:
               @Override
               public void onCreate() {
                   super.onCreate();
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      NotificationChannel channel = new NotificationChannel(
-                          CHANNEL_ID,
-                          "WattappsAU Online Service",
-                          NotificationManager.IMPORTANCE_LOW
-                      );
-                      NotificationManager manager = getSystemService(NotificationManager.class);
-                      if (manager != null) manager.createNotificationChannel(channel);
-                  }
-                  PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-                  if (pm != null) {
-                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WattappsAU::KeepAlive");
-                      wakeLock.acquire();
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          NotificationChannel channel = new NotificationChannel(
+                              CHANNEL_ID,
+                              "WattappsAU Online Service",
+                              NotificationManager.IMPORTANCE_LOW
+                          );
+                          NotificationManager manager = getSystemService(NotificationManager.class);
+                          if (manager != null) manager.createNotificationChannel(channel);
+                      }
+                      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                      if (pm != null) {
+                          wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WattappsAU::KeepAlive");
+                          wakeLock.acquire();
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
                   }
               }
 
               @Override
               public int onStartCommand(Intent intent, int flags, int startId) {
-                  Intent notifIntent = new Intent(this, MainActivity.class);
-                  PendingIntent pendingIntent = PendingIntent.getActivity(
-                      this, 0, notifIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-                  );
+                  try {
+                      Intent notifIntent = new Intent(this, MainActivity.class);
+                      PendingIntent pendingIntent = PendingIntent.getActivity(
+                          this, 0, notifIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+                      );
 
-                  Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-                      .setContentTitle("WattappsAU • Online")
-                      .setContentText("Koneksi P2P & panggilan siap di latar belakang")
-                      .setSmallIcon(R.mipmap.ic_launcher)
-                      .setContentIntent(pendingIntent)
-                      .setOngoing(true)
-                      .build();
+                      Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                          .setContentTitle("WattappsAU • Online")
+                          .setContentText("Koneksi P2P & panggilan siap di latar belakang")
+                          .setSmallIcon(android.R.drawable.ic_dialog_info)
+                          .setContentIntent(pendingIntent)
+                          .setOngoing(true)
+                          .build();
 
-                  startForeground(NOTIF_ID, notification);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                          startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                      } else {
+                          startForeground(NOTIF_ID, notification);
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
                   return START_STICKY;
               }
 
               @Override
               public void onDestroy() {
-                  if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+                  try {
+                      if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                  }
                   super.onDestroy();
               }
 
@@ -122,7 +139,7 @@ jobs:
           }
           EOF
 
-          # 2. Perbarui MainActivity.java agar menjalankan KeepAliveService & izin mikrofon
+          # 2. Perbarui MainActivity.java agar meminta izin dulu sebelum startForegroundService
           cat << 'EOF' > "$PKG_DIR/MainActivity.java"
           package id.diskomlekau.wattappsau;
 
@@ -131,6 +148,7 @@ jobs:
           import android.content.pm.PackageManager;
           import android.os.Build;
           import android.os.Bundle;
+          import androidx.annotation.NonNull;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
           import com.getcapacitor.BridgeActivity;
@@ -138,10 +156,15 @@ jobs:
           import java.util.List;
 
           public class MainActivity extends BridgeActivity {
+              private static final int REQ_PERMS = 1001;
+
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+                  checkAndRequestPermissions();
+              }
 
+              private void checkAndRequestPermissions() {
                   List<String> perms = new ArrayList<>();
                   if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                       perms.add(Manifest.permission.RECORD_AUDIO);
@@ -152,23 +175,59 @@ jobs:
                       }
                   }
                   if (!perms.isEmpty()) {
-                      ActivityCompat.requestPermissions(this, perms.toArray(new String[0]), 1001);
-                  }
-
-                  Intent serviceIntent = new Intent(this, KeepAliveService.class);
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      startForegroundService(serviceIntent);
+                      ActivityCompat.requestPermissions(this, perms.toArray(new String[0]), REQ_PERMS);
                   } else {
-                      startService(serviceIntent);
+                      startKeepAliveServiceSafe();
+                  }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  if (requestCode == REQ_PERMS) {
+                      startKeepAliveServiceSafe();
+                  }
+              }
+
+              private void startKeepAliveServiceSafe() {
+                  try {
+                      Intent serviceIntent = new Intent(this, KeepAliveService.class);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          startForegroundService(serviceIntent);
+                      } else {
+                          startService(serviceIntent);
+                      }
+                  } catch (Exception e) {
+                      e.printStackTrace();
                   }
               }
           }
           EOF
 
-          # 3. Tambahkan permissions & service ke AndroidManifest.xml
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          sed -i 's/<application/<uses-permission android:name="android.permission.FOREGROUND_SERVICE" \/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" \/>\n    <uses-permission android:name="android.permission.WAKE_LOCK" \/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" \/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO" \/>\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" \/>\n    <application/' "$MANIFEST"
-          sed -i 's/<\/application>/    <service android:name=".KeepAliveService" android:enabled="true" android:exported="false" android:foregroundServiceType="connectedDevice" \/>\n    <\/application>/' "$MANIFEST"
+          # 3. Sisipkan izin dan service ke AndroidManifest.xml memakai Node.js agar XML tidak rusak
+          node -e '
+            const fs = require("fs");
+            const path = "android/app/src/main/AndroidManifest.xml";
+            let xml = fs.readFileSync(path, "utf8");
+            const perms = `
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+            `;
+            const service = `
+              <service
+                  android:name=".KeepAliveService"
+                  android:enabled="true"
+                  android:exported="false"
+                  android:foregroundServiceType="dataSync" />
+            `;
+            xml = xml.replace("<application", perms + "\n    <application");
+            xml = xml.replace("</application>", service + "\n    </application>");
+            fs.writeFileSync(path, xml);
+          '
 
       - name: Build Debug APK
         run: |
