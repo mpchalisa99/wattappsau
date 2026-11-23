@@ -736,7 +736,7 @@ jobs:
               <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
             `;
-            const services = `
+                        const services = `
               <service
                   android:name=".KeepAliveService"
                   android:enabled="true"
@@ -754,6 +754,18 @@ jobs:
             xml = xml.replace("</application>", services + "\n    </application>");
             fs.writeFileSync(path, xml);
           '
+
+      - name: Set Custom App Icon
+        run: |
+          sudo apt-get update && sudo apt-get install -y imagemagick
+          for dir in android/app/src/main/res/mipmap-*; do
+            if [ -d "$dir" ]; then
+              convert logo.png -resize 512x512 "$dir/ic_launcher.png"
+              convert logo.png -resize 512x512 "$dir/ic_launcher_round.png"
+              convert logo.png -resize 512x512 "$dir/ic_launcher_foreground.png"
+            fi
+          done
+          rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
       - name: Build Debug APK
         run: |
