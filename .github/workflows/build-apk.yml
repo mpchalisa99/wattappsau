@@ -26,9 +26,10 @@ jobs:
 
       - name: Install Capacitor & Generate Android Project
         run: |
-          mkdir -p www
+          mkdir -p www assets
           echo "<h1>WattappsAU Loading...</h1>" > www/index.html
           npm install
+          npm install -D @capacitor/assets
           npx cap init "WattappsAU" "id.diskomlekau.wattappsau" --web-dir www
           node -e '
             const fs = require("fs");
@@ -39,13 +40,22 @@ jobs:
               server: {
                 url: "https://wa-iota-lemon.vercel.app",
                 cleartext: true
+              },
+              android: {
+                allowMixedContent: true,
+                captureInput: true,
+                webContentsDebuggingEnabled: true
               }
             };
             fs.writeFileSync("capacitor.config.json", JSON.stringify(cfg, null, 2));
           '
           npx cap add android
+          if [ -f "icon.png" ]; then
+            cp icon.png assets/icon.png
+            npx capacitor-assets generate --android
+          fi
 
-      - name: Inject KeepAliveService, CallNotification & Camera Permissions
+      - name: Inject KeepAliveService, CallNotification, Tablet WebView & Camera Permissions
         run: |
           PKG_DIR="android/app/src/main/java/id/diskomlekau/wattappsau"
           mkdir -p "$PKG_DIR"
@@ -139,7 +149,7 @@ jobs:
           }
           EOF
 
-          # 2. Buat MainActivity.java dengan Izin Kamera + Mikrofon + Notifikasi Panggilan Masuk (Angkat/Tutup)
+          # 2. Buat MainActivity.java dengan Optimasi WebView Tablet + Kamera + Mikrofon + Notifikasi Panggilan
           cat << 'EOF' > "$PKG_DIR/MainActivity.java"
           package id.diskomlekau.wattappsau;
 
@@ -153,9 +163,12 @@ jobs:
           import android.os.Build;
           import android.os.Bundle;
           import android.view.WindowManager;
+          import android.webkit.CookieManager;
           import android.webkit.JavascriptInterface;
           import android.webkit.PermissionRequest;
           import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
           import androidx.annotation.NonNull;
           import androidx.core.app.ActivityCompat;
           import androidx.core.app.NotificationCompat;
@@ -173,7 +186,6 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  // Izinkan layar menyala saat ada panggilan masuk
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                       setShowWhenLocked(true);
                       setTurnScreenOn(true);
@@ -220,8 +232,21 @@ jobs:
 
               private void setupWebViewPermissionsAndBridge() {
                   if (bridge != null && bridge.getWebView() != null) {
-                      bridge.getWebView().addJavascriptInterface(new WebAppInterface(), "AndroidBridge");
-                      bridge.getWebView().setWebChromeClient(new WebChromeClient() {
+                      WebView webView = bridge.getWebView();
+                      WebSettings settings = webView.getSettings();
+                      settings.setJavaScriptEnabled(true);
+                      settings.setDomStorageEnabled(true);
+                      settings.setDatabaseEnabled(true);
+                      settings.setMediaPlaybackRequiresUserGesture(false);
+                      settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                      settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+
+                      CookieManager cookieManager = CookieManager.getInstance();
+                      cookieManager.setAcceptCookie(true);
+                      cookieManager.setAcceptThirdPartyCookies(webView, true);
+
+                      webView.addJavascriptInterface(new WebAppInterface(), "AndroidBridge");
+                      webView.setWebChromeClient(new WebChromeClient() {
                           @Override
                           public void onPermissionRequest(final PermissionRequest request) {
                               runOnUiThread(() -> request.grant(request.getResources()));
@@ -341,7 +366,7 @@ jobs:
           }
           EOF
 
-          # 3. Sisipkan izin Kamera, FullScreenIntent & service ke AndroidManifest.xml
+          # 3. Sisipkan izin Jaringan, Kamera, FullScreenIntent & service ke AndroidManifest.xml
           node -e '
             const fs = require("fs");
             const path = "android/app/src/main/AndroidManifest.xml";
@@ -349,6 +374,8 @@ jobs:
             const perms = `
               <uses-feature android:name="android.hardware.camera" android:required="false" />
               <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
               <uses-permission android:name="android.permission.CAMERA" />
               <uses-permission android:name="android.permission.RECORD_AUDIO" />
               <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
