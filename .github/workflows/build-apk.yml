@@ -764,8 +764,36 @@ jobs:
               convert logo.png -resize 512x512 "$dir/ic_launcher_round.png"
               convert logo.png -resize 512x512 "$dir/ic_launcher_foreground.png"
             fi
-          done
+          done 
           rm -rf android/app/src/main/res/mipmap-anydpi-v26
+
+      - name: Patch MainActivity File Chooser
+        run: |
+          node -e '
+            const fs = require("fs");
+            const entries = fs.existsSync("android") ? fs.readdirSync("android", { recursive: true }) : [];
+            const files = entries
+              .filter(f => typeof f === "string" && f.endsWith("MainActivity.java"))
+              .map(f => "android/" + f.replace(/\\/g, "/"));
+            for (const path of files) {
+              let code = fs.readFileSync(path, "utf8");
+              if (!code.includes("filePathCallback")) {
+                code = code.replace(
+                  /(public class MainActivity[^{]*\{)/,
+                  `$1\n    private android.webkit.ValueCallback<android.net.Uri[]> filePathCallback;\n    private static final int FILE_CHOOSER_RESULT_CODE = 1042;`
+                );
+                code = code.replace(
+                  /(webView\.setWebChromeClient\s*\(\s*new android\.webkit\.WebChromeClient\(\)\s*\{)/,
+                  `$1\n            @Override\n            public boolean onShowFileChooser(android.webkit.WebView wv, android.webkit.ValueCallback<android.net.Uri[]> cb, android.webkit.WebChromeClient.FileChooserParams params) {\n                if (MainActivity.this.filePathCallback != null) {\n                    MainActivity.this.filePathCallback.onReceiveValue(null);\n                }\n                MainActivity.this.filePathCallback = cb;\n                try {\n                    startActivityForResult(params.createIntent(), FILE_CHOOSER_RESULT_CODE);\n                } catch (Exception e) {\n                    MainActivity.this.filePathCallback = null;\n                    return false;\n                }\n                return true;\n            }`
+                );
+                code = code.replace(
+                  /(@Override\s+protected void onActivityResult\([^{]*\{)/,
+                  `$1\n        if (requestCode == FILE_CHOOSER_RESULT_CODE && filePathCallback != null) {\n            android.net.Uri[] res = android.webkit.WebChromeClient.FileChooserParams.parseResult(resultCode, data);\n            filePathCallback.onReceiveValue(res);\n            filePathCallback = null;\n        }`
+                );
+                fs.writeFileSync(path, code);
+              }
+            }
+          '
 
       - name: Build Debug APK
         run: |
@@ -774,6 +802,7 @@ jobs:
           ./gradlew assembleDebug
 
       - name: Upload APK Artifact
+
         uses: actions/upload-artifact@v4
         with:
           name: WattappsAU-FCM-APK
