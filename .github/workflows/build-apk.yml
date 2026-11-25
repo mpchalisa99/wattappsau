@@ -767,13 +767,13 @@ jobs:
           done
           rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
-      - name: Patch File Chooser All Activities
+      - name: Patch File Chooser MainActivity
         run: |
           node -e '
             const fs = require("fs");
             const entries = fs.existsSync("android") ? fs.readdirSync("android", { recursive: true }) : [];
             const javaFiles = entries
-              .filter(f => typeof f === "string" && f.endsWith(".java"))
+              .filter(f => typeof f === "string" && f.endsWith("MainActivity.java"))
               .map(f => "android/" + f.replace(/\\/g, "/"));
 
             const onShowMethod = `
@@ -796,9 +796,9 @@ jobs:
 
             for (const p of javaFiles) {
               let c = fs.readFileSync(p, "utf8");
-              if (c.includes("class ") && !c.includes("wattappsFileCb")) {
+              if (c.includes("class MainActivity") && !c.includes("wattappsFileCb")) {
                 c = c.replace(
-                  /((?:public\s+)?class\s+\w+[^{]*\{)/,
+                  /(public\s+class\s+MainActivity[^{]*\{)/,
                   `$1\n    private android.webkit.ValueCallback<android.net.Uri[]> wattappsFileCb;`
                 );
 
