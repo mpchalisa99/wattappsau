@@ -736,7 +736,7 @@ jobs:
               <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
             `;
-                        const services = `
+            const services = `
               <service
                   android:name=".KeepAliveService"
                   android:enabled="true"
@@ -764,33 +764,67 @@ jobs:
               convert logo.png -resize 512x512 "$dir/ic_launcher_round.png"
               convert logo.png -resize 512x512 "$dir/ic_launcher_foreground.png"
             fi
-          done 
+          done
           rm -rf android/app/src/main/res/mipmap-anydpi-v26
 
-      - name: Patch MainActivity File Chooser
+      - name: Patch File Chooser All Activities
         run: |
           node -e '
             const fs = require("fs");
             const entries = fs.existsSync("android") ? fs.readdirSync("android", { recursive: true }) : [];
-            const files = entries
-              .filter(f => typeof f === "string" && f.endsWith("MainActivity.java"))
+            const javaFiles = entries
+              .filter(f => typeof f === "string" && f.endsWith(".java"))
               .map(f => "android/" + f.replace(/\\/g, "/"));
-            for (const path of files) {
-              let code = fs.readFileSync(path, "utf8");
-              if (!code.includes("filePathCallback")) {
-                code = code.replace(
-                  /(public class MainActivity[^{]*\{)/,
-                  `$1\n    private android.webkit.ValueCallback<android.net.Uri[]> filePathCallback;\n    private static final int FILE_CHOOSER_RESULT_CODE = 1042;`
+
+            const onShowMethod = `
+                @Override
+                public boolean onShowFileChooser(android.webkit.WebView webView, android.webkit.ValueCallback<android.net.Uri[]> cb, android.webkit.WebChromeClient.FileChooserParams params) {
+                    if (wattappsFileCb != null) {
+                        wattappsFileCb.onReceiveValue(null);
+                    }
+                    wattappsFileCb = cb;
+                    android.content.Intent intent = params.createIntent();
+                    try {
+                        startActivityForResult(intent, 1042);
+                    } catch (Exception e) {
+                        wattappsFileCb = null;
+                        return false;
+                    }
+                    return true;
+                }
+            `;
+
+            for (const p of javaFiles) {
+              let c = fs.readFileSync(p, "utf8");
+              if (c.includes("class ") && !c.includes("wattappsFileCb")) {
+                c = c.replace(
+                  /((?:public\s+)?class\s+\w+[^{]*\{)/,
+                  `$1\n    private android.webkit.ValueCallback<android.net.Uri[]> wattappsFileCb;`
                 );
-                code = code.replace(
-                  /(webView\.setWebChromeClient\s*\(\s*new android\.webkit\.WebChromeClient\(\)\s*\{)/,
-                  `$1\n            @Override\n            public boolean onShowFileChooser(android.webkit.WebView wv, android.webkit.ValueCallback<android.net.Uri[]> cb, android.webkit.WebChromeClient.FileChooserParams params) {\n                if (MainActivity.this.filePathCallback != null) {\n                    MainActivity.this.filePathCallback.onReceiveValue(null);\n                }\n                MainActivity.this.filePathCallback = cb;\n                try {\n                    startActivityForResult(params.createIntent(), FILE_CHOOSER_RESULT_CODE);\n                } catch (Exception e) {\n                    MainActivity.this.filePathCallback = null;\n                    return false;\n                }\n                return true;\n            }`
-                );
-                code = code.replace(
-                  /(@Override\s+protected void onActivityResult\([^{]*\{)/,
-                  `$1\n        if (requestCode == FILE_CHOOSER_RESULT_CODE && filePathCallback != null) {\n            android.net.Uri[] res = android.webkit.WebChromeClient.FileChooserParams.parseResult(resultCode, data);\n            filePathCallback.onReceiveValue(res);\n            filePathCallback = null;\n        }`
-                );
-                fs.writeFileSync(path, code);
+
+                if (c.includes("new android.webkit.WebChromeClient()") || c.includes("new WebChromeClient()")) {
+                  c = c.replace(
+                    /(new\s+(?:android\.webkit\.)?WebChromeClient\s*\(\s*\)\s*\{)/g,
+                    `$1${onShowMethod}`
+                  );
+                }
+
+                const lastBrace = c.lastIndexOf("}");
+                if (lastBrace !== -1 && !c.includes("onActivityResult(")) {
+                  const fallbackBlock = `
+                @Override
+                protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+                    super.onActivityResult(requestCode, resultCode, data);
+                    if (requestCode == 1042 && wattappsFileCb != null) {
+                        android.net.Uri[] res = android.webkit.WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+                        wattappsFileCb.onReceiveValue(res);
+                        wattappsFileCb = null;
+                    }
+                }
+            `;
+                  c = c.slice(0, lastBrace) + fallbackBlock + "\n}\n";
+                }
+                fs.writeFileSync(p, c);
               }
             }
           '
@@ -802,7 +836,6 @@ jobs:
           ./gradlew assembleDebug
 
       - name: Upload APK Artifact
-
         uses: actions/upload-artifact@v4
         with:
           name: WattappsAU-FCM-APK
